@@ -6,7 +6,6 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from bs4 import BeautifulSoup
 import pandas as pd
 import requests
 import streamlit as st
@@ -236,8 +235,8 @@ def extract_officer_id(officer: Dict[str, Any]) -> str:
 def page_contains_tide_ascp_verification(html_text: str) -> bool:
     if not html_text:
         return False
-    soup = BeautifulSoup(html_text, "html.parser")
-    page_text = normalize_text(soup.get_text(" ", strip=True))
+    page_text = re.sub(r"<[^>]+>", " ", html_text)
+    page_text = normalize_text(page_text)
     return (
         "identity verified by" in page_text
         and "authorised corporate service provider" in page_text
