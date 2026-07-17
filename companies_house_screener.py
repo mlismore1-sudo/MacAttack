@@ -109,7 +109,8 @@ TARGET_ADDRESS_TERMS = [
     "W12",
 ]
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company", "Target Address"]
-ACSP_EXCLUSION_PROVIDER = "tide platform ltd acsp"
+TIDE_ACSP_EXCLUSION_PROVIDER = "tide platform ltd acsp"
+ICON_ACSP_BONUS_PROVIDER = "icon offices limited acsp"
 
 
 def apply_custom_css() -> None:
@@ -232,7 +233,7 @@ def extract_officer_id(officer: Dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
-def page_contains_tide_ascp_verification(html_text: str) -> bool:
+def page_contains_acsp_provider(html_text: str, provider_name: str) -> bool:
     if not html_text:
         return False
     page_text = re.sub(r"<[^>]+>", " ", html_text)
@@ -240,7 +241,7 @@ def page_contains_tide_ascp_verification(html_text: str) -> bool:
     return (
         "identity verified by" in page_text
         and "authorised corporate service provider" in page_text
-        and ACSP_EXCLUSION_PROVIDER in page_text
+        and provider_name in page_text
     )
 
 
@@ -383,6 +384,8 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
     ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
     ensure_column(conn, "screened_companies", "high_sign_up_potential", "TEXT")
+    ensure_column(conn, "screened_companies", "icon_verified", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "icon_verified_detail", "TEXT")
     return conn
 
 
@@ -411,8 +414,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             international_shareholder, international_shareholder_detail,
             owned_by_company, owner_company_name,
             pulled_at, raw_json, profile_url, shortlisted,
-            target_address, target_address_detail, high_sign_up_potential
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            target_address, target_address_detail, high_sign_up_potential,
+            icon_verified, icon_verified_detail
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"],
@@ -434,6 +438,8 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             int(row.get("target_address", False)),
             row.get("target_address_detail", ""),
             row.get("high_sign_up_potential", ""),
+            int(row.get("icon_verified", False)),
+            row.get("icon_verified_detail", ""),
         ),
     )
     conn.commit()
@@ -529,8 +535,10 @@ def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
 
 
-def company_has_excluded_tide_verified_director(client: CHClient, company_number: str) -> bool:
+def check_director_acsp_status(client: CHClient, company_number: str) -> Tuple[bool, bool]:
     officers = get_all_officers(client, company_number)
+    tide_verified = False
+    icon_verified = False
     for officer in officers:
         role = normalize_text(officer.get("officer_role"))
         if "director" not in role and role != "designated member":
@@ -539,9 +547,12 @@ def company_has_excluded_tide_verified_director(client: CHClient, company_number
         if not officer_id:
             continue
         html = client.get_text(officer_appointments_url(officer_id))
-        if page_contains_tide_ascp_verification(html):
-            return True
-    return False
+        if page_contains_acsp_provider(html, TIDE_ACSP_EXCLUSION_PROVIDER):
+            tide_verified = True
+            break
+        if page_contains_acsp_provider(html, ICON_ACSP_BONUS_PROVIDER):
+            icon_verified = True
+    return tide_verified, icon_verified
 
 
 def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str]]:
@@ -600,6 +611,7 @@ def build_rating(
     international_shareholder: bool,
     owned_by_company: bool,
     target_address: bool,
+    icon_verified: bool,
     director_details: List[str],
     shareholder_details: List[str],
 ) -> str:
@@ -612,6 +624,8 @@ def build_rating(
         stars += 1
     if target_address:
         stars += 1
+    if icon_verified:
+        stars += 1
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
     return "⭐" * stars
@@ -620,7 +634,8 @@ def build_rating(
 def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Optional[Dict[str, Any]]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
-    if company_has_excluded_tide_verified_director(client, company_number):
+    tide_verified, icon_verified = check_director_acsp_status(client, company_number)
+    if tide_verified:
         return None
     international_director, director_details = collect_international_director_details(client, company_number)
     international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
@@ -629,7 +644,7 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
     target_address_detail = get_target_address_match(full_address)
     target_address = bool(target_address_detail)
     sic_code = parse_matching_sic(item)
-    high_sign_up_potential = "⚡" if target_address and any(code.strip() in TARGET_SIC_CODES for code in sic_code.split(",")) else ""
+    high_sign_up_potential = "⚡" if (target_address and any(code.strip() in TARGET_SIC_CODES for code in sic_code.split(","))) or icon_verified else ""
     return {
         "company_number": company_number,
         "company_name": company_name,
@@ -646,6 +661,8 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
         "target_address": target_address,
         "target_address_detail": f"✓ {target_address_detail}" if target_address_detail else "",
         "high_sign_up_potential": high_sign_up_potential,
+        "icon_verified": icon_verified,
+        "icon_verified_detail": "✓ ICON OFFICES LIMITED ACSP" if icon_verified else "",
         "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "raw_json": item,
         "profile_url": make_company_profile_url(company_number, company_name),
@@ -657,7 +674,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     if db_df.empty:
         return pd.DataFrame(columns=[
             "Shortlist", "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company", "Target Address",
+            "International Director", "International Shareholder", "Owned By A Company", "Target Address", "ICON Verified",
             "Profile", "Pulled At", "company_number",
         ])
 
@@ -670,6 +687,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         shareholder_flag = bool(int(row.get("international_shareholder", 0) or 0))
         owner_flag = bool(int(row.get("owned_by_company", 0) or 0))
         target_address_flag = bool(int(row.get("target_address", 0) or 0))
+        icon_verified_flag = bool(int(row.get("icon_verified", 0) or 0))
 
         if director_flag:
             labels.append("Director 🌍")
@@ -679,6 +697,8 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             labels.append("Company owner 🏢")
         if target_address_flag:
             labels.append("Target address 📍")
+        if icon_verified_flag:
+            labels.append("ICON verified ✅")
         signal_labels.append(" · ".join(labels))
 
         director_detail_values = [x.strip() for x in str(row.get("international_director_detail", "")).split("|") if x.strip()]
@@ -689,6 +709,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
                 international_shareholder=shareholder_flag,
                 owned_by_company=owner_flag,
                 target_address=target_address_flag,
+                icon_verified=icon_verified_flag,
                 director_details=director_detail_values,
                 shareholder_details=shareholder_detail_values,
             )
@@ -706,6 +727,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(""),
         "Owned By A Company": db_df.get("owner_company_name", pd.Series(dtype=str)).fillna(""),
         "Target Address": db_df.get("target_address_detail", pd.Series(dtype=str)).fillna(""),
+        "ICON Verified": db_df.get("icon_verified_detail", pd.Series(dtype=str)).fillna(""),
         "Profile": db_df.get("profile_url", pd.Series(dtype=str)).fillna(""),
         "Pulled At": db_df["pulled_at"],
         "company_number": db_df["company_number"],
@@ -750,18 +772,15 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     target_addresses = int(display_df["Target Address"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
-    flagged = int(((display_df["International Director"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["International Shareholder"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["Target Address"].astype(str).str.startswith("✓", na=False))).sum()) if not display_df.empty else 0
+    icon_verified = int(display_df["ICON Verified"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     shortlisted = int(display_df["Shortlist"].sum()) if not display_df.empty else 0
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Results", f"{total:,}")
-    c2.metric("Flagged Rows", f"{flagged:,}")
-    c3.metric("Intl Directors", f"{director:,}")
-    c4.metric("Intl Shareholders", f"{shareholder:,}")
-    c5.metric("Target Addresses", f"{target_addresses:,}")
+    c2.metric("Intl Directors", f"{director:,}")
+    c3.metric("Intl Shareholders", f"{shareholder:,}")
+    c4.metric("Target Addresses", f"{target_addresses:,}")
+    c5.metric("ICON Verified", f"{icon_verified:,}")
     c6.metric("Shortlisted", f"{shortlisted:,}")
 
 
@@ -858,8 +877,9 @@ def main() -> None:
             <div class="signal-pill">Shareholder 🌍 = international PSC match</div>
             <div class="signal-pill">Company owner 🏢 = corporate PSC match</div>
             <div class="signal-pill">Target address 📍 = registered office partial match</div>
-            <div class="signal-pill">Rating ⭐ = 1 star per signal, plus a bonus for Sweden, Norway, or USA director/shareholder</div>
-            <div class="signal-pill">High Sign Up Potential ⚡ = target SIC + target address</div>
+            <div class="signal-pill">ICON verified ✅ = director verified by ICON OFFICES LIMITED ACSP</div>
+            <div class="signal-pill">Rating ⭐ = 1 star per signal, plus a bonus for Sweden, Norway, USA, and ICON verification</div>
+            <div class="signal-pill">High Sign Up Potential ⚡ = target SIC + target address, or ICON verification</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -883,7 +903,7 @@ def main() -> None:
 
         editor_df = filtered_df[[
             "Shortlist", "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company", "Target Address",
+            "International Director", "International Shareholder", "Owned By A Company", "Target Address", "ICON Verified",
             "Profile", "Pulled At", "company_number",
         ]].copy()
 
@@ -893,13 +913,13 @@ def main() -> None:
             hide_index=True,
             disabled=[
                 "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
-                "International Director", "International Shareholder", "Owned By A Company", "Target Address",
+                "International Director", "International Shareholder", "Owned By A Company", "Target Address", "ICON Verified",
                 "Profile", "Pulled At", "company_number",
             ],
             column_config={
                 "Shortlist": st.column_config.CheckboxColumn("Shortlist", help="Tick to mark this company for follow-up."),
-                "Rating": st.column_config.TextColumn("Rating", width="small", help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder, plus ⭐ for a target address."),
-                "High Sign Up Potential?": st.column_config.TextColumn("High Sign Up Potential?", width="small", help="⚡ when both target SIC and target address are matched."),
+                "Rating": st.column_config.TextColumn("Rating", width="small", help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder, plus ⭐ for a target address, plus ⭐ for ICON verification."),
+                "High Sign Up Potential?": st.column_config.TextColumn("High Sign Up Potential?", width="small", help="⚡ when target SIC and target address are matched, or when a director is ICON verified."),
                 "Company Name": st.column_config.TextColumn("Company Name", width="large"),
                 "Category": st.column_config.TextColumn("Category", width="medium"),
                 "SIC Code": st.column_config.TextColumn("SIC Code", width="small"),
@@ -908,6 +928,7 @@ def main() -> None:
                 "International Shareholder": st.column_config.TextColumn("International Shareholder", width="large"),
                 "Owned By A Company": st.column_config.TextColumn("Owned By A Company", width="large"),
                 "Target Address": st.column_config.TextColumn("Target Address", width="large"),
+                "ICON Verified": st.column_config.TextColumn("ICON Verified", width="large"),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open record", width="small"),
                 "Pulled At": st.column_config.TextColumn("Pulled At", width="medium"),
                 "company_number": None,
@@ -974,8 +995,9 @@ def main() -> None:
 - PSC page size: {PSC_PAGE_SIZE}
 - Dedupe rule: company numbers already screened for the selected incorporation date are skipped
 - Secrets key expected: `COMPANIES_HOUSE_API_KEY`
-- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, rating column, high sign up potential column
+- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, rating column, high sign up potential column, ICON verification flag
 - Exclusions: companies are skipped when a director appointment page shows identity verified by `Tide Platform Ltd ACSP`
+- Bonus scoring: companies get an extra star when a director appointment page shows identity verified by `ICON OFFICES LIMITED ACSP`
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
