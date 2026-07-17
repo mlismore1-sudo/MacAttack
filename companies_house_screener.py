@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
+from bs4 import BeautifulSoup
 import pandas as pd
 import requests
 import streamlit as st
@@ -109,6 +110,7 @@ TARGET_ADDRESS_TERMS = [
     "W12",
 ]
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company", "Target Address"]
+ACSP_EXCLUSION_PROVIDER = "tide platform ltd acsp"
 
 
 def apply_custom_css() -> None:
@@ -173,7 +175,6 @@ def normalize_text(value: Any) -> str:
 NORMALIZED_COUNTRY_TERMS = {normalize_text(x) for x in COUNTRY_TERMS}
 NORMALIZED_NATIONALITY_TERMS = {normalize_text(x) for x in NATIONALITY_TERMS}
 NORMALIZED_ALLOWED_COMPANY_TYPES = {normalize_text(x) for x in ALLOWED_COMPANY_TYPES}
-NORMALIZED_TARGET_ADDRESS_TERMS = {normalize_text(x) for x in TARGET_ADDRESS_TERMS}
 
 
 def canonical_country_from_value(value: Any) -> str:
@@ -219,6 +220,29 @@ def format_flagged_countries(values: List[str]) -> str:
 def make_company_profile_url(company_number: str, company_name: str) -> str:
     safe_name = quote(company_name or "company")
     return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{safe_name}"
+
+
+def officer_appointments_url(officer_id: str) -> str:
+    return f"https://find-and-update.company-information.service.gov.uk/officers/{officer_id}/appointments"
+
+
+def extract_officer_id(officer: Dict[str, Any]) -> str:
+    links = officer.get("links") or {}
+    raw = str(links.get("officer", "") or links.get("self", "")).strip()
+    match = re.search(r"/officers/([^/]+)", raw)
+    return match.group(1) if match else ""
+
+
+def page_contains_tide_ascp_verification(html_text: str) -> bool:
+    if not html_text:
+        return False
+    soup = BeautifulSoup(html_text, "html.parser")
+    page_text = normalize_text(soup.get_text(" ", strip=True))
+    return (
+        "identity verified by" in page_text
+        and "authorised corporate service provider" in page_text
+        and ACSP_EXCLUSION_PROVIDER in page_text
+    )
 
 
 def get_sic_categories(item: Dict[str, Any]) -> str:
@@ -298,6 +322,31 @@ class CHClient:
                 self._rotate()
                 time.sleep(0.5)
         raise RuntimeError(f"Companies House API request failed after retries: {last_error}")
+
+    def get_text(self, url: str) -> str:
+        last_error = None
+        for _ in range(max(len(self.api_keys) * 3, 3)):
+            try:
+                response = self.session.get(
+                    url,
+                    auth=self._auth(),
+                    timeout=30,
+                    headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+                )
+                if response.status_code == 404:
+                    return ""
+                if response.status_code in (401, 403, 429):
+                    last_error = f"HTTP {response.status_code}"
+                    self._rotate()
+                    time.sleep(0.5)
+                    continue
+                response.raise_for_status()
+                return response.text
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                self._rotate()
+                time.sleep(0.5)
+        raise RuntimeError(f"Companies House HTML request failed after retries: {last_error}")
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -481,6 +530,21 @@ def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
 
 
+def company_has_excluded_tide_verified_director(client: CHClient, company_number: str) -> bool:
+    officers = get_all_officers(client, company_number)
+    for officer in officers:
+        role = normalize_text(officer.get("officer_role"))
+        if "director" not in role and role != "designated member":
+            continue
+        officer_id = extract_officer_id(officer)
+        if not officer_id:
+            continue
+        html = client.get_text(officer_appointments_url(officer_id))
+        if page_contains_tide_ascp_verification(html):
+            return True
+    return False
+
+
 def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str]]:
     officers = get_all_officers(client, company_number)
     matches: List[str] = []
@@ -554,9 +618,11 @@ def build_rating(
     return "⭐" * stars
 
 
-def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Dict[str, Any]:
+def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Optional[Dict[str, Any]]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
+    if company_has_excluded_tide_verified_director(client, company_number):
+        return None
     international_director, director_details = collect_international_director_details(client, company_number)
     international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
     owner_display = " | ".join([f"✓ {name}" for name in owner_names]) if owner_names else ""
@@ -768,6 +834,8 @@ def main() -> None:
                 company_number = item.get("company_number", "unknown")
                 try:
                     row = process_company(client, item, date_str)
+                    if row is None:
+                        continue
                     upsert_company(conn, row)
                 except Exception as exc:
                     failures.append(f"{company_number}: {exc}")
@@ -908,6 +976,7 @@ def main() -> None:
 - Dedupe rule: company numbers already screened for the selected incorporation date are skipped
 - Secrets key expected: `COMPANIES_HOUSE_API_KEY`
 - UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, rating column, high sign up potential column
+- Exclusions: companies are skipped when a director appointment page shows identity verified by `Tide Platform Ltd ACSP`
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
