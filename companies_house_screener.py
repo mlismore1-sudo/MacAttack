@@ -17,36 +17,11 @@ DB_PATH = "companies_house_screening.db"
 SEARCH_PAGE_SIZE = 5000
 OFFICERS_PAGE_SIZE = 100
 PSC_PAGE_SIZE = 100
+TARGET_SIC_CODES = ["90030", "59111", "74202", "47910", "46190", "73110", "70229"]
 SIC_CATEGORIES = {
-    "Food & Plant Importers": [
-        "46220", "46240", "46310", "46320", "46330", "46341", "46342", "46360", "46370", "46380", "46390",
-    ],
-    "Media production": [
-        "59111", "59112", "59113", "59120", "59131", "59200", "60200", "61300",
-    ],
-    "Construction / Property": [
-        "41100", "41201", "41202", "42110", "43110", "43120", "43130", "43210", "43220", "43290",
-        "43310", "43320", "43330", "43340", "43341", "43342", "43390", "43999",
-    ],
-    "Manufacturing": [
-        "10110", "10130", "10310", "10410", "10511", "10512", "10611", "10612", "10840", "10850",
-        "10890", "10920", "13100", "13200", "13300", "13921", "13923", "13960", "14131", "15110",
-        "16290", "19200", "20110", "20120", "20130", "20140", "20150", "20160", "20170", "20200",
-        "20301", "20302", "20411", "20412", "20590", "21100", "22210", "22290", "23190", "23910",
-        "23990", "24100", "24200", "24310", "24320", "24330", "24340", "24410", "24420", "24430",
-        "24440", "24450", "24460", "24510", "25110", "25210", "25500", "25990", "26110", "26200",
-        "26300", "26511", "26512", "26600", "27110", "27200", "28110", "28290", "28300", "28990",
-        "29100", "29310", "30110", "30300", "31090", "32990",
-    ],
-    "Wholesale": [
-        "46110", "46120", "46130", "46140", "46150", "46160", "46170", "46180", "46190", "46210",
-        "46220", "46230", "46240", "46310", "46320", "46330", "46341", "46342", "46350", "46360",
-        "46370", "46380", "46390", "46410", "46420", "46431", "46439", "46440", "46450", "46460",
-        "46470", "46480", "46499", "46510", "46520", "46530", "46610", "46620", "46630", "46640",
-        "46650", "46660", "46690", "46711", "46719", "46720", "46730", "46740", "46750", "46900",
-    ],
+    "Target SIC": TARGET_SIC_CODES,
 }
-ALLOWED_SIC_CODES = sorted({code for codes in SIC_CATEGORIES.values() for code in codes})
+ALLOWED_SIC_CODES = sorted(set(TARGET_SIC_CODES))
 SIC_TO_CATEGORIES: Dict[str, List[str]] = {}
 for category, codes in SIC_CATEGORIES.items():
     for code in codes:
@@ -61,12 +36,12 @@ ALLOWED_COMPANY_TYPES = [
 COUNTRY_TERMS = {
     "usa", "united states", "united states of america", "france", "germany", "belgium", "norway",
     "sweden", "finland", "denmark", "austria", "poland", "spain", "portugal", "greece", "italy",
-    "hungary", "croatia", "ireland", "china", "netherlands", "india", "hong kong", "singapore",
+    "hungary", "croatia", "ireland", "netherlands", "india", "hong kong", "singapore",
 }
 NATIONALITY_TERMS = {
     "american", "us", "united states", "united states of america", "french", "german", "belgian",
     "norwegian", "swedish", "finnish", "danish", "austrian", "polish", "spanish", "portuguese",
-    "greek", "italian", "hungarian", "croatian", "irish", "chinese", "indian", "hong kong",
+    "greek", "italian", "hungarian", "croatian", "irish", "indian", "hong kong",
     "hongkong", "singaporean", "dutch", "netherlands",
 }
 COMPANY_OWNER_KINDS = {
@@ -92,7 +67,6 @@ COUNTRY_FLAG_MAP = {
     "hungary": "🇭🇺",
     "croatia": "🇭🇷",
     "ireland": "🇮🇪",
-    "china": "🇨🇳",
     "netherlands": "🇳🇱",
     "india": "🇮🇳",
     "hong kong": "🇭🇰",
@@ -118,7 +92,6 @@ NATIONALITY_TO_COUNTRY = {
     "hungarian": "hungary",
     "croatian": "croatia",
     "irish": "ireland",
-    "chinese": "china",
     "indian": "india",
     "hong kong": "hong kong",
     "hongkong": "hong kong",
@@ -126,7 +99,16 @@ NATIONALITY_TO_COUNTRY = {
     "dutch": "netherlands",
     "netherlands": "netherlands",
 }
-SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
+TARGET_ADDRESS_TERMS = [
+    "86-90 Paul Street",
+    "128 City Road",
+    "71-75 Shelton Street",
+    "Strand",
+    "Southwark Bridge Road",
+    "66 Paul Street",
+    "W12",
+]
+SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company", "Target Address"]
 
 
 def apply_custom_css() -> None:
@@ -191,6 +173,7 @@ def normalize_text(value: Any) -> str:
 NORMALIZED_COUNTRY_TERMS = {normalize_text(x) for x in COUNTRY_TERMS}
 NORMALIZED_NATIONALITY_TERMS = {normalize_text(x) for x in NATIONALITY_TERMS}
 NORMALIZED_ALLOWED_COMPANY_TYPES = {normalize_text(x) for x in ALLOWED_COMPANY_TYPES}
+NORMALIZED_TARGET_ADDRESS_TERMS = {normalize_text(x) for x in TARGET_ADDRESS_TERMS}
 
 
 def canonical_country_from_value(value: Any) -> str:
@@ -250,6 +233,30 @@ def get_sic_categories(item: Dict[str, Any]) -> str:
             seen.add(category)
             deduped_categories.append(category)
     return " | ".join(deduped_categories)
+
+
+def extract_company_address(item: Dict[str, Any]) -> str:
+    address = item.get("registered_office_address") or item.get("address") or {}
+    parts = [
+        address.get("premises"),
+        address.get("address_line_1"),
+        address.get("address_line_2"),
+        address.get("locality"),
+        address.get("region"),
+        address.get("postal_code"),
+        address.get("country"),
+    ]
+    return ", ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def get_target_address_match(address_text: str) -> str:
+    normalized_address = normalize_text(address_text)
+    if not normalized_address:
+        return ""
+    for target in TARGET_ADDRESS_TERMS:
+        if normalize_text(target) in normalized_address:
+            return target
+    return ""
 
 
 class CHClient:
@@ -325,6 +332,9 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "profile_url", "TEXT")
     ensure_column(conn, "screened_companies", "shortlisted", "INTEGER DEFAULT 0")
     ensure_column(conn, "screened_companies", "sic_category", "TEXT")
+    ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
+    ensure_column(conn, "screened_companies", "high_sign_up_potential", "TEXT")
     return conn
 
 
@@ -352,8 +362,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             international_director, international_director_detail,
             international_shareholder, international_shareholder_detail,
             owned_by_company, owner_company_name,
-            pulled_at, raw_json, profile_url, shortlisted
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pulled_at, raw_json, profile_url, shortlisted,
+            target_address, target_address_detail, high_sign_up_potential
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"],
@@ -372,6 +383,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             json.dumps(row.get("raw_json", {})),
             row.get("profile_url", ""),
             int(row.get("shortlisted", False)),
+            int(row.get("target_address", False)),
+            row.get("target_address_detail", ""),
+            row.get("high_sign_up_potential", ""),
         ),
     )
     conn.commit()
@@ -522,6 +536,7 @@ def build_rating(
     international_director: bool,
     international_shareholder: bool,
     owned_by_company: bool,
+    target_address: bool,
     director_details: List[str],
     shareholder_details: List[str],
 ) -> str:
@@ -531,6 +546,8 @@ def build_rating(
     if international_shareholder:
         stars += 1
     if owned_by_company:
+        stars += 1
+    if target_address:
         stars += 1
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
@@ -543,10 +560,15 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
     international_director, director_details = collect_international_director_details(client, company_number)
     international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
     owner_display = " | ".join([f"✓ {name}" for name in owner_names]) if owner_names else ""
+    full_address = extract_company_address(item)
+    target_address_detail = get_target_address_match(full_address)
+    target_address = bool(target_address_detail)
+    sic_code = parse_matching_sic(item)
+    high_sign_up_potential = "⚡" if target_address and any(code.strip() in TARGET_SIC_CODES for code in sic_code.split(",")) else ""
     return {
         "company_number": company_number,
         "company_name": company_name,
-        "sic_code": parse_matching_sic(item),
+        "sic_code": sic_code,
         "sic_category": get_sic_categories(item),
         "incorporation_date": target_date,
         "company_type": item.get("company_type", ""),
@@ -556,6 +578,9 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
         "international_shareholder_detail": format_flagged_countries(shareholder_details),
         "owned_by_company": owned_by_company,
         "owner_company_name": owner_display,
+        "target_address": target_address,
+        "target_address_detail": f"✓ {target_address_detail}" if target_address_detail else "",
+        "high_sign_up_potential": high_sign_up_potential,
         "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "raw_json": item,
         "profile_url": make_company_profile_url(company_number, company_name),
@@ -566,8 +591,8 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     if db_df.empty:
         return pd.DataFrame(columns=[
-            "Shortlist", "Rating", "Company Name", "Category", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company",
+            "Shortlist", "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
+            "International Director", "International Shareholder", "Owned By A Company", "Target Address",
             "Profile", "Pulled At", "company_number",
         ])
 
@@ -579,6 +604,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         director_flag = bool(int(row.get("international_director", 0) or 0))
         shareholder_flag = bool(int(row.get("international_shareholder", 0) or 0))
         owner_flag = bool(int(row.get("owned_by_company", 0) or 0))
+        target_address_flag = bool(int(row.get("target_address", 0) or 0))
 
         if director_flag:
             labels.append("Director 🌍")
@@ -586,6 +612,8 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             labels.append("Shareholder 🌍")
         if owner_flag:
             labels.append("Company owner 🏢")
+        if target_address_flag:
+            labels.append("Target address 📍")
         signal_labels.append(" · ".join(labels))
 
         director_detail_values = [x.strip() for x in str(row.get("international_director_detail", "")).split("|") if x.strip()]
@@ -595,6 +623,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
                 international_director=director_flag,
                 international_shareholder=shareholder_flag,
                 owned_by_company=owner_flag,
+                target_address=target_address_flag,
                 director_details=director_detail_values,
                 shareholder_details=shareholder_detail_values,
             )
@@ -603,6 +632,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({
         "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
         "Rating": rating_series,
+        "High Sign Up Potential?": db_df.get("high_sign_up_potential", pd.Series(dtype=str)).fillna(""),
         "Company Name": db_df["company_name"],
         "Category": db_df.get("sic_category", pd.Series(dtype=str)).fillna(""),
         "SIC Code": db_df["sic_code"],
@@ -610,6 +640,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         "International Director": db_df.get("international_director_detail", pd.Series(dtype=str)).fillna(""),
         "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(""),
         "Owned By A Company": db_df.get("owner_company_name", pd.Series(dtype=str)).fillna(""),
+        "Target Address": db_df.get("target_address_detail", pd.Series(dtype=str)).fillna(""),
         "Profile": db_df.get("profile_url", pd.Series(dtype=str)).fillna(""),
         "Pulled At": db_df["pulled_at"],
         "company_number": db_df["company_number"],
@@ -636,6 +667,8 @@ def apply_filters(
             mask |= filtered["International Shareholder"].astype(str).str.startswith("✓", na=False)
         if "Owned By A Company" in selected_signals:
             mask |= filtered["Owned By A Company"].astype(str).str.startswith("✓", na=False)
+        if "Target Address" in selected_signals:
+            mask |= filtered["Target Address"].astype(str).str.startswith("✓", na=False)
         filtered = filtered[mask].copy()
     if category_filter:
         category_pattern = "|".join(re.escape(category) for category in category_filter)
@@ -651,19 +684,20 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     total = len(display_df)
     director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
+    target_addresses = int(display_df["Target Address"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     flagged = int(((display_df["International Director"].astype(str).str.startswith("✓", na=False)) |
                    (display_df["International Shareholder"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False))).sum()) if not display_df.empty else 0
+                   (display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False)) |
+                   (display_df["Target Address"].astype(str).str.startswith("✓", na=False))).sum()) if not display_df.empty else 0
     shortlisted = int(display_df["Shortlist"].sum()) if not display_df.empty else 0
-    categorized = int(display_df["Category"].astype(str).ne("").sum()) if not display_df.empty else 0
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Results", f"{total:,}")
     c2.metric("Flagged Rows", f"{flagged:,}")
     c3.metric("Intl Directors", f"{director:,}")
     c4.metric("Intl Shareholders", f"{shareholder:,}")
-    c5.metric("Shortlisted", f"{shortlisted:,}")
-    st.caption(f"Categorised rows: {categorized:,}")
+    c5.metric("Target Addresses", f"{target_addresses:,}")
+    c6.metric("Shortlisted", f"{shortlisted:,}")
 
 
 def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str, bool, bool, List[str]]:
@@ -676,8 +710,8 @@ def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str,
         only_flagged = st.checkbox("Show only flagged rows", value=False)
         selected_signals = st.multiselect("Signals", options=SIGNAL_OPTIONS, default=SIGNAL_OPTIONS)
         category_filter = st.multiselect("Categories", options=list(SIC_CATEGORIES.keys()), default=[])
-        sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 46310")
-        company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
+        sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 59111")
+        company_name_search = st.text_input("Filter by company name", placeholder="e.g. Studios")
         shortlisted_only = st.checkbox("Show shortlisted only", value=False)
         st.divider()
         st.caption("The sidebar keeps controls separate from the results table for faster screening.")
@@ -687,12 +721,12 @@ def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str,
 def main() -> None:
     apply_custom_css()
     st.title("Companies House New Incorporations Screener")
-    st.caption("Pull newly incorporated active companies, group them into SIC categories, and enrich results with officer and PSC checks.")
+    st.caption("Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer, PSC, and registered office checks.")
 
     st.markdown(
         """
         <div class="app-note">
-        Designed for rapid lead triage: run the pull, scan KPIs, filter the signals and categories, shortlist candidates, and click through to Companies House profiles.
+        Designed for rapid lead triage: run the pull, scan KPIs, filter the signals, shortlist candidates, and click through to Companies House profiles.
         </div>
         """,
         unsafe_allow_html=True,
@@ -716,7 +750,7 @@ def main() -> None:
     if run:
         failures: List[str] = []
         with st.status("Running Companies House screening...", expanded=True) as status:
-            st.write("Querying advanced search using the combined SIC code list derived from the category mapping.")
+            st.write("Querying advanced search using the target SIC code list.")
             companies, diagnostics = search_new_companies(client, date_str)
             already_seen = existing_company_numbers(conn, date_str)
             new_companies = [c for c in companies if c.get("company_number") not in already_seen]
@@ -756,7 +790,9 @@ def main() -> None:
             <div class="signal-pill">Director 🌍 = international director match</div>
             <div class="signal-pill">Shareholder 🌍 = international PSC match</div>
             <div class="signal-pill">Company owner 🏢 = corporate PSC match</div>
+            <div class="signal-pill">Target address 📍 = registered office partial match</div>
             <div class="signal-pill">Rating ⭐ = 1 star per signal, plus a bonus for Sweden, Norway, or USA director/shareholder</div>
+            <div class="signal-pill">High Sign Up Potential ⚡ = target SIC + target address</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -779,8 +815,8 @@ def main() -> None:
         st.caption(f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} rows currently visible after filters.")
 
         editor_df = filtered_df[[
-            "Shortlist", "Rating", "Company Name", "Category", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company",
+            "Shortlist", "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
+            "International Director", "International Shareholder", "Owned By A Company", "Target Address",
             "Profile", "Pulled At", "company_number",
         ]].copy()
 
@@ -789,20 +825,22 @@ def main() -> None:
             use_container_width=True,
             hide_index=True,
             disabled=[
-                "Rating", "Company Name", "Category", "SIC Code", "Signals",
-                "International Director", "International Shareholder", "Owned By A Company",
+                "Rating", "High Sign Up Potential?", "Company Name", "Category", "SIC Code", "Signals",
+                "International Director", "International Shareholder", "Owned By A Company", "Target Address",
                 "Profile", "Pulled At", "company_number",
             ],
             column_config={
                 "Shortlist": st.column_config.CheckboxColumn("Shortlist", help="Tick to mark this company for follow-up."),
-                "Rating": st.column_config.TextColumn("Rating", width="small", help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder."),
+                "Rating": st.column_config.TextColumn("Rating", width="small", help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder, plus ⭐ for a target address."),
+                "High Sign Up Potential?": st.column_config.TextColumn("High Sign Up Potential?", width="small", help="⚡ when both target SIC and target address are matched."),
                 "Company Name": st.column_config.TextColumn("Company Name", width="large"),
-                "Category": st.column_config.TextColumn("Category", width="large"),
+                "Category": st.column_config.TextColumn("Category", width="medium"),
                 "SIC Code": st.column_config.TextColumn("SIC Code", width="small"),
                 "Signals": st.column_config.TextColumn("Signals", width="medium"),
                 "International Director": st.column_config.TextColumn("International Director", width="large"),
                 "International Shareholder": st.column_config.TextColumn("International Shareholder", width="large"),
                 "Owned By A Company": st.column_config.TextColumn("Owned By A Company", width="large"),
+                "Target Address": st.column_config.TextColumn("Target Address", width="large"),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open record", width="small"),
                 "Pulled At": st.column_config.TextColumn("Pulled At", width="medium"),
                 "company_number": None,
@@ -860,15 +898,16 @@ def main() -> None:
             f"""
 - Company status: Active
 - Company types sent to API: `{', '.join(ALLOWED_COMPANY_TYPES)}`
+- Target SIC codes in use: `{', '.join(TARGET_SIC_CODES)}`
 - SIC categories in use: {len(SIC_CATEGORIES)}
 - Unique SIC codes sent to API: {len(ALLOWED_SIC_CODES)}
-- Category names: `{', '.join(SIC_CATEGORIES.keys())}`
+- Target address partial matches: `{', '.join(TARGET_ADDRESS_TERMS)}`
 - Advanced search page size: {SEARCH_PAGE_SIZE}
 - Officers page size: {OFFICERS_PAGE_SIZE}
 - PSC page size: {PSC_PAGE_SIZE}
 - Dedupe rule: company numbers already screened for the selected incorporation date are skipped
 - Secrets key expected: `COMPANIES_HOUSE_API_KEY`
-- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, SIC category tagging, rating column
+- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, rating column, high sign up potential column
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
